@@ -86,20 +86,49 @@ if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
-# Start dashboard in background if HERMES_DASHBOARD=1
-if [ "${HERMES_DASHBOARD:-0}" = "1" ]; then
-    DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
-    DASHBOARD_PORT="${DASHBOARD_PORT:-9119}"
-    (
-        while true; do
-            hermes dashboard --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" --no-open --insecure \
-                >> "$HERMES_HOME/logs/dashboard.log" 2>&1
-            echo "$(date): Dashboard exited, restarting in 3s..." >> "$HERMES_HOME/logs/dashboard.log"
-            sleep 3
-        done
-    ) &
-    echo "Dashboard started on $DASHBOARD_HOST:$DASHBOARD_PORT (PID $!)"
-fi
+# Optionally start `hermes dashboard` as a side-process.
+#
+# Toggled by HERMES_DASHBOARD=1 (also accepts "true"/"yes", case-insensitive).
+# Host/port/TUI can be overridden via:
+#   HERMES_DASHBOARD_HOST  (default 0.0.0.0 — exposed outside the container)
+#   HERMES_DASHBOARD_PORT  (default 9119, matches `hermes dashboard` default)
+#   HERMES_DASHBOARD_TUI   (already honored by `hermes dashboard` itself)
+#
+# The dashboard is a long-lived server.  We background it *before* the final
+# `exec hermes "$@"` so the user's chosen foreground command (chat, gateway,
+# sleep infinity, …) remains PID-of-interest for the container runtime.  When
+# the container stops the whole process tree is torn down, so no explicit
+# cleanup is needed.
+#
+# CN-mirrors branch: also accepts the legacy DASHBOARD_HOST/DASHBOARD_PORT env
+# vars and wraps the server in a restart loop so a transient crash doesn't
+# leave the dashboard offline for the lifetime of the container.
+case "${HERMES_DASHBOARD:-}" in
+    1|true|TRUE|True|yes|YES|Yes)
+        dash_host="${HERMES_DASHBOARD_HOST:-${DASHBOARD_HOST:-0.0.0.0}}"
+        dash_port="${HERMES_DASHBOARD_PORT:-${DASHBOARD_PORT:-9119}}"
+        dash_args=(--host "$dash_host" --port "$dash_port" --no-open)
+        # Binding to anything other than localhost requires --insecure — the
+        # dashboard refuses otherwise because it exposes API keys.  Inside a
+        # container this is the expected deployment (host reaches it via
+        # published port), so opt in automatically.
+        if [ "$dash_host" != "127.0.0.1" ] && [ "$dash_host" != "localhost" ]; then
+            dash_args+=(--insecure)
+        fi
+        echo "Starting hermes dashboard on ${dash_host}:${dash_port} (background, auto-restart)"
+        # Restart loop: if the dashboard crashes, wait 3s and relaunch.
+        # Prefix dashboard output so it's distinguishable from the main
+        # process in `docker logs`.  stdbuf keeps the pipe line-buffered.
+        (
+            while true; do
+                stdbuf -oL -eL hermes dashboard "${dash_args[@]}" 2>&1 \
+                    | sed -u 's/^/[dashboard] /'
+                echo "[dashboard] exited, restarting in 3s..."
+                sleep 3
+            done
+        ) &
+        ;;
+esac
 
 # Final exec: two supported invocation patterns.
 #
