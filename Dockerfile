@@ -7,8 +7,13 @@ ARG DOCKERHUB_MIRROR=docker.m.daocloud.io
 ARG APT_MIRROR=mirrors.aliyun.com
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+# pip / uv go upstream pypi.org via PIP_PROXY (CN aliyun mirror's torch /
+# onnxruntime / ctranslate2 wheels were observed at <1MB/s in this network;
+# upstream pypi behind the local HTTP proxy is faster and more reliable).
+# Override PIP_PROXY with --build-arg if no proxy is available.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=pypi.org
+ARG PIP_PROXY=""
 
 FROM ${GHCR_MIRROR}/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 FROM ${DOCKERHUB_MIRROR}/library/debian:13.4
@@ -20,6 +25,7 @@ ARG NPM_REGISTRY
 ARG PLAYWRIGHT_DOWNLOAD_HOST
 ARG PIP_INDEX_URL
 ARG PIP_TRUSTED_HOST
+ARG PIP_PROXY
 
 # Disable Python stdout buffering to ensure logs are printed immediately
 ENV PYTHONUNBUFFERED=1
@@ -27,6 +33,11 @@ ENV PYTHONUNBUFFERED=1
 # Store Playwright browsers outside the volume mount so the build-time
 # install survives the /opt/data volume overlay at runtime.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+
+# Shared uv cache directory for both the root-stage `uv sync` and the
+# hermes-stage `uv pip install -e` so they hit the same BuildKit cache
+# mount and never re-download wheels across rebuilds (#cache_mount).
+ENV UV_CACHE_DIR=/build-cache/uv
 
 # Swap Debian sources to the CN mirror (trixie uses deb822-style sources).
 # If APT_MIRROR is set to the upstream deb.debian.org this is a no-op.
@@ -92,7 +103,10 @@ ARG PLAYWRIGHT_PROXY=""
 
 # npm install uses npmmirror (fast in CN). Skip playwright's postinstall browser
 # download here; we do it in a separate RUN below so we can scope the proxy.
-RUN export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 && \
+# `--mount=type=cache,target=/root/.npm` persists the npm tarball cache across
+# rebuilds so a busted upstream layer doesn't re-download the npm registry.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 && \
     npm install --prefer-offline --no-audit && \
     (cd web && npm install --prefer-offline --no-audit) && \
     (cd ui-tui && npm install --prefer-offline --no-audit)
@@ -127,7 +141,14 @@ RUN unset PLAYWRIGHT_DOWNLOAD_HOST && \
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all
+# `--mount=type=cache,target=${UV_CACHE_DIR}` persists uv's wheel cache across
+# rebuilds so a busted upstream layer doesn't re-download every wheel from
+# pypi.  uid=10000/gid=10000 so the later hermes-user `uv pip install` step
+# can share the same cache without permission issues (root can still write).
+RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked \
+    HTTPS_PROXY="${PIP_PROXY}" HTTP_PROXY="${PIP_PROXY}" \
+    uv sync --frozen --no-install-project --extra all && \
+    chown -R 10000:10000 /build-cache/uv
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
@@ -147,16 +168,20 @@ RUN cd web && npm run build && \
 # not chowned here.
 USER root
 RUN chmod -R a+rX /opt/hermes && \
-    chown -R hermes:hermes /opt/hermes/ui-tui /opt/hermes/node_modules
+    chown -R hermes:hermes /opt/hermes/ui-tui /opt/hermes/node_modules /opt/hermes/.venv
 # Start as root so the entrypoint can usermod/groupmod + gosu.
 # If HERMES_UID is unset, the entrypoint drops to the default hermes user (10000).
 
-# ---------- Python virtualenv ----------
+# ---------- Link hermes-agent itself (editable) ----------
 RUN chown hermes:hermes /opt/hermes
 USER hermes
 ENV UV_INDEX_URL=${PIP_INDEX_URL}
-RUN uv venv && \
-    uv pip install --no-config --no-cache-dir -e ".[all]"
+# Deps are already installed in the cached layer above (`uv sync ... --extra all`),
+# so this is just a fast (~1s) egg-link creation with no resolution or downloads.
+# Cache mount is still attached so any incidental sdist build artefacts hit the
+# shared cache rather than rebuilding from scratch.
+RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked \
+    uv pip install --no-config --no-deps -e "."
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
