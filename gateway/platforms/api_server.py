@@ -314,7 +314,12 @@ class ResponseStore:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Use shared WAL-fallback helper so response_store.db degrades
+        # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
+        # issue addressed for state.db/kanban.db — see
+        # hermes_state._WAL_INCOMPAT_MARKERS).
+        from hermes_state import apply_wal_with_fallback
+        apply_wal_with_fallback(self._conn, db_label="response_store.db")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS responses (
                 response_id TEXT PRIMARY KEY,
@@ -800,6 +805,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         gateway_session_key: Optional[str] = None,
     ) -> Any:
         """
@@ -848,6 +854,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            reasoning_callback=reasoning_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
@@ -1145,6 +1152,33 @@ class APIServerAdapter(BasePlatformAdapter):
                     "status": "completed",
                 }))
 
+            def _on_reasoning(text):
+                """Forward chain-of-thought tokens to the SSE stream as a
+                dedicated ``delta.reasoning_content`` chunk.
+
+                Unifies two upstream reasoning sources:
+
+                  * A-class — structured ``delta.reasoning_content`` from
+                    DeepSeek/Moonshot/Kimi/GLM/MiniMax/Tencent thinking
+                    modes; arrives via ``run_agent._fire_reasoning_delta``
+                    on the model's reasoning channel.
+                  * B-class — ``<think>`` / ``<thinking>`` / ``<reasoning>``
+                    inline tags from open-weights models (Qwen3 thinking,
+                    finetunes following the DeepSeek-R1 prompt template,
+                    MiniMax-M2.7, etc.); the ``StreamingThinkScrubber``
+                    now surfaces the scrubbed-out text alongside the
+                    visible delta and ``_fire_stream_delta`` routes it
+                    through ``_fire_reasoning_delta`` as well.
+
+                Both arrive here as plain text and are emitted on the
+                SSE wire as ``{"choices":[{"delta":{"reasoning_content":
+                "…"}}]}`` — the de-facto OpenAI-compatible field popularised
+                by DeepSeek and consumed natively by OpenWebUI, Lobe
+                Chat, ChatGPT-Next-Web, Cline, Cursor, Continue, …
+                """
+                if text:
+                    _stream_q.put(("__reasoning__", text))
+
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             #
@@ -1162,6 +1196,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
+                reasoning_callback=_on_reasoning,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
@@ -1203,10 +1238,49 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = result.get("final_response", "")
-        if not final_response:
-            final_response = result.get("error", "(No response generated)")
+        final_response = result.get("final_response") or ""
+        is_partial = bool(result.get("partial"))
+        is_failed = bool(result.get("failed"))
+        completed = bool(result.get("completed", True))
+        err_msg = result.get("error")
 
+        # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
+        # for normal completion, and downstream SDKs accept "error" / custom
+        # codes. See issue #22496.
+        if is_partial and err_msg and "truncat" in err_msg.lower():
+            finish_reason = "length"
+        elif is_failed or (not completed and err_msg):
+            finish_reason = "error"
+        else:
+            finish_reason = "stop"
+
+        response_headers = {
+            "X-Hermes-Session-Id": result.get("session_id", session_id),
+        }
+        if gateway_session_key:
+            response_headers["X-Hermes-Session-Key"] = gateway_session_key
+
+        # Hard-fail path: no usable assistant text AND a real failure → 5xx
+        # with OpenAI-style error envelope so SDK clients raise instead of
+        # silently rendering the internal failure string as message.content.
+        if not final_response and (is_failed or is_partial):
+            err_body = _openai_error(
+                err_msg or "Agent run did not produce a response.",
+                err_type="server_error",
+                code="agent_incomplete",
+            )
+            err_body["error"]["hermes"] = {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+            }
+            response_headers["X-Hermes-Completed"] = "false"
+            response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            return web.json_response(err_body, status=502, headers=response_headers)
+
+        # Soft-partial path: we have *some* text but the run did not complete
+        # (e.g. truncation with partial buffered output). Still 200 but signal
+        # truncation via finish_reason="length" + Hermes-specific extras.
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
@@ -1219,7 +1293,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "role": "assistant",
                         "content": final_response,
                     },
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {
@@ -1228,12 +1302,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        if is_partial or is_failed or not completed:
+            response_data["hermes"] = {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+                "error": err_msg,
+                "error_code": "output_truncated" if finish_reason == "length" else "agent_error",
+            }
+            response_headers["X-Hermes-Completed"] = "false"
+            response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            if err_msg:
+                response_headers["X-Hermes-Error"] = err_msg[:200]
 
-        response_headers = {
-            "X-Hermes-Session-Id": result.get("session_id", session_id),
-        }
-        if gateway_session_key:
-            response_headers["X-Hermes-Session-Key"] = gateway_session_key
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
@@ -1284,16 +1365,42 @@ class APIServerAdapter(BasePlatformAdapter):
                 """Write a single queue item to the SSE stream.
 
                 Plain strings are sent as normal ``delta.content`` chunks.
-                Tagged tuples ``("__tool_progress__", payload)`` are sent
-                as a custom ``event: hermes.tool.progress`` SSE event so
-                frontends can display them without storing the markers in
-                conversation history.  See #6972 for the original event,
-                #16588 for the ``toolCallId``/``status`` lifecycle fields.
+
+                Tagged tuples are routed to dedicated channels so frontends
+                can display them without contaminating ``delta.content`` /
+                conversation history:
+
+                  * ``("__tool_progress__", payload)`` → custom
+                    ``event: hermes.tool.progress`` SSE event
+                    (#6972 / #16588).
+                  * ``("__reasoning__", text)`` → standard
+                    ``chat.completion.chunk`` carrying
+                    ``delta.reasoning_content`` — the de-facto
+                    OpenAI-compatible reasoning field popularised by
+                    DeepSeek and natively understood by OpenWebUI /
+                    Lobe Chat / ChatGPT-Next-Web / Cline / Continue.
+                    Unifies A-class (structured ``reasoning_content``
+                    from thinking models) and B-class (``<think>`` tags
+                    recovered by ``StreamingThinkScrubber``) reasoning
+                    on a single wire format.
                 """
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
                     event_data = json.dumps(item[1])
                     await response.write(
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
+                    )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__reasoning__":
+                    reasoning_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"reasoning_content": item[1]},
+                            "finish_reason": None,
+                        }],
+                    }
+                    await response.write(
+                        f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode()
                     )
                 else:
                     content_chunk = {
@@ -2739,6 +2846,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
     ) -> tuple:
@@ -2763,6 +2871,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
+                reasoning_callback=reasoning_callback,
                 gateway_session_key=gateway_session_key,
             )
             if agent_ref is not None:
