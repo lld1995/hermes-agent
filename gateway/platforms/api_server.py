@@ -702,6 +702,14 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
+        # Tool calls transparency: when enabled, /v1/chat/completions returns
+        # tool_calls in the message even though the agent executed them automatically.
+        # Disabled by default to maintain standard OpenAI semantics where tool_calls
+        # implies the client should execute them.
+        self._expose_tool_calls: bool = _coerce_request_bool(
+            extra.get("expose_tool_calls", os.getenv("API_SERVER_EXPOSE_TOOL_CALLS", "false")),
+            default=False,
+        )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -1836,6 +1844,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 Skips tools whose names start with ``_`` so internal
                 events (``_thinking``, …) stay off the wire — matching
                 the prior ``_on_tool_progress`` filter exactly.
+
+                When expose_tool_calls is enabled, also emits standard
+                OpenAI tool_calls format for transparency.
                 """
                 if not tool_call_id or function_name.startswith("_"):
                     return
@@ -1850,12 +1861,26 @@ class APIServerAdapter(BasePlatformAdapter):
                     "status": "running",
                 }))
 
+                # When expose_tool_calls is enabled, emit standard OpenAI format
+                if self._expose_tool_calls:
+                    _stream_q.put(("__tool_call_start__", {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": function_name,
+                            "arguments": json.dumps(function_args) if isinstance(function_args, dict) else str(function_args or ""),
+                        }
+                    }))
+
             def _on_tool_complete(tool_call_id, function_name, function_args, function_result):
                 """Emit the matching ``status: completed`` event.
 
                 Dropped if the start was filtered (internal tool, missing
                 id, or never seen) so clients never get an orphaned
                 ``completed`` they can't correlate to a prior ``running``.
+
+                When expose_tool_calls is enabled, also emits tool result
+                as a custom event for observability.
                 """
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
@@ -1865,6 +1890,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     "toolCallId": tool_call_id,
                     "status": "completed",
                 }))
+
+                # When expose_tool_calls is enabled, emit tool result
+                if self._expose_tool_calls:
+                    _stream_q.put(("__tool_call_result__", {
+                        "tool_call_id": tool_call_id,
+                        "name": function_name,
+                        "content": json.dumps(function_result) if not isinstance(function_result, str) else function_result,
+                    }))
 
             def _on_reasoning(text):
                 """Forward chain-of-thought tokens to the SSE stream as a
@@ -2007,6 +2040,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # client-supplied name when the upstream did not advertise one.
         upstream_model = result.get("last_response_model")
         response_model = upstream_model if isinstance(upstream_model, str) and upstream_model else model_name
+
+        # Build assistant message with optional tool_calls transparency
+        assistant_message = self._build_chat_completion_message(result, final_response)
+
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
@@ -2015,10 +2052,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": final_response,
-                    },
+                    "message": assistant_message,
                     "finish_reason": finish_reason,
                 }
             ],
@@ -2086,6 +2120,9 @@ class APIServerAdapter(BasePlatformAdapter):
             await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
             last_activity = time.monotonic()
 
+            # Track emitted tool_calls for proper indexing
+            _emitted_tool_calls: List[Dict[str, Any]] = []
+
             # Helper — route a queue item to the correct SSE event.
             async def _emit(item):
                 """Write a single queue item to the SSE stream.
@@ -2109,7 +2146,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     from thinking models) and B-class (``<think>`` tags
                     recovered by ``StreamingThinkScrubber``) reasoning
                     on a single wire format.
+                  * ``("__tool_call_start__", payload)`` → standard
+                    ``chat.completion.chunk`` carrying ``delta.tool_calls``
+                    (when expose_tool_calls is enabled).
+                  * ``("__tool_call_result__", payload)`` → custom
+                    ``event: hermes.tool.result`` for observability
+                    (when expose_tool_calls is enabled).
                 """
+                nonlocal _emitted_tool_calls
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
                     event_data = json.dumps(item[1])
                     await response.write(
@@ -2127,6 +2171,36 @@ class APIServerAdapter(BasePlatformAdapter):
                     }
                     await response.write(
                         f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode()
+                    )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_call_start__":
+                    # Emit standard OpenAI tool_calls delta chunk
+                    tool_call = item[1]
+                    tool_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": len(_emitted_tool_calls),
+                                    "id": tool_call["id"],
+                                    "type": tool_call["type"],
+                                    "function": tool_call["function"],
+                                }]
+                            },
+                            "finish_reason": None,
+                        }],
+                    }
+                    _emitted_tool_calls.append(tool_call)
+                    await response.write(f"data: {json.dumps(tool_chunk)}\n\n".encode())
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_call_result__":
+                    # Emit custom event for tool result (for observability)
+                    # Note: Standard OpenAI API expects clients to send tool results,
+                    # but since we're an agent that auto-executes, we emit this as
+                    # a custom event for transparency.
+                    result_data = item[1]
+                    await response.write(
+                        f"event: hermes.tool.result\ndata: {json.dumps(result_data)}\n\n".encode()
                     )
                 else:
                     content_chunk = {
@@ -3604,6 +3678,42 @@ class APIServerAdapter(BasePlatformAdapter):
             ],
         })
         return items
+
+    def _build_chat_completion_message(
+        self, result: Dict[str, Any], final_response: str
+    ) -> Dict[str, Any]:
+        """Build a Chat Completions message with optional tool_calls transparency.
+
+        When expose_tool_calls is enabled, includes tool_calls that the agent
+        executed automatically. This provides full observability of the agent's
+        reasoning process while maintaining OpenAI-compatible message format.
+
+        Note: Unlike standard OpenAI tool calling where tool_calls means "client
+        should execute these", here the tools have already been executed by the
+        agent. The tool_calls field is for transparency/observability only.
+        """
+        message = {
+            "role": "assistant",
+            "content": final_response,
+        }
+
+        if not self._expose_tool_calls:
+            return message
+
+        # Extract tool_calls from agent's message history
+        tool_calls = []
+        messages = result.get("messages", [])
+
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Collect all tool calls from assistant messages
+                for tc in msg["tool_calls"]:
+                    tool_calls.append(tc)
+
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        return message
 
     # ------------------------------------------------------------------
     # Agent execution
