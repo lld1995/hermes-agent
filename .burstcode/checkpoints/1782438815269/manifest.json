@@ -1,8 +1,0 @@
-{
-  "label": "prompt: 通用 OpenAI 兼容 我调用的时候应该怎么传给hermes控制",
-  "createdAt": 1782438815269,
-  "baseRef": "file:1782438659548",
-  "chainDepth": 10,
-  "files": [],
-  "deleted": []
-}

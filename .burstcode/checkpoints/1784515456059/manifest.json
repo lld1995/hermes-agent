@@ -1,8 +1,0 @@
-{
-  "label": "prompt: 先commit and push，然后切到lld/cn-mirrors并merge，然后push",
-  "createdAt": 1784515456059,
-  "baseRef": "file:1784515373602",
-  "chainDepth": 4,
-  "files": [],
-  "deleted": []
-}

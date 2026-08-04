@@ -1,8 +1,0 @@
-{
-  "label": "prompt: 修改下docker构建的文件，我要加些库和命令行工具。python-docx docx逆向报告技能 cryptog...",
-  "createdAt": 1781681648765,
-  "baseRef": "file:1781593375157",
-  "chainDepth": 19,
-  "files": [],
-  "deleted": []
-}

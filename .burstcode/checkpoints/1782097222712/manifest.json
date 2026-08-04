@@ -1,8 +1,0 @@
-{
-  "label": "prompt: 走completion接口问答时，有时会弹出权限校验，能配置默认全部跳过吗",
-  "createdAt": 1782097222712,
-  "baseRef": "file:1781682299751",
-  "chainDepth": 5,
-  "files": [],
-  "deleted": []
-}

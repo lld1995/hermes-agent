@@ -1,8 +1,0 @@
-{
-  "label": "prompt: /v1/chat/completions 看下这个接口如何指定思考或非思考给上游",
-  "createdAt": 1782438583282,
-  "baseRef": "file:1782097534677",
-  "chainDepth": 7,
-  "files": [],
-  "deleted": []
-}

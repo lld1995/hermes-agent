@@ -1,5 +1,0 @@
-# email_parse_plugin 依赖
-# 本脚本仅使用 Python 标准库，无需额外依赖
-# 如需扩展功能可添加:
-# requests>=2.31.0
-# minio>=7.2.0
