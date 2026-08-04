@@ -1,0 +1,21 @@
+{
+  "label": "prompt: 制作docker镜像，你可以看下现在的镜像，覆盖test和创建个当前日期的",
+  "createdAt": 1784515373602,
+  "baseRef": "file:1784514892471",
+  "chainDepth": 3,
+  "files": [
+    {
+      "relativePath": "gateway/run.py"
+    },
+    {
+      "relativePath": "gateway/platforms/api_server.py"
+    },
+    {
+      "relativePath": "tests/gateway/test_api_server.py"
+    },
+    {
+      "relativePath": "tests/gateway/test_auth_fallback.py"
+    }
+  ],
+  "deleted": []
+}

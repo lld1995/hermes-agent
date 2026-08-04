@@ -1,0 +1,8 @@
+{
+  "label": "prompt: responses 是调哪个接口，给我个调用示例，改的代码是不是没用，没用的话我直接reject",
+  "createdAt": 1780476219808,
+  "baseRef": "file:1780473327372",
+  "chainDepth": 17,
+  "files": [],
+  "deleted": []
+}

@@ -8,6 +8,17 @@ import pytest
 class TestResolveRuntimeAgentKwargsAuthFallback:
     """_resolve_runtime_agent_kwargs should try fallback on AuthError."""
 
+    def test_target_model_is_forwarded_to_runtime_provider(self):
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={},
+        ) as resolve_runtime:
+            from gateway.run import _resolve_runtime_agent_kwargs
+
+            _resolve_runtime_agent_kwargs(target_model="request-model")
+
+        resolve_runtime.assert_called_once_with(target_model="request-model")
+
     def test_auth_error_tries_fallback(self, tmp_path, monkeypatch):
         """When primary provider raises AuthError, fallback is attempted."""
         from hermes_cli.auth import AuthError

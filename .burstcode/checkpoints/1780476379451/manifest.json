@@ -1,0 +1,8 @@
+{
+  "label": "prompt: 你git diff看下，刚改了些代码，是不是无用的改动",
+  "createdAt": 1780476379451,
+  "baseRef": "file:1780476219808",
+  "chainDepth": 18,
+  "files": [],
+  "deleted": []
+}

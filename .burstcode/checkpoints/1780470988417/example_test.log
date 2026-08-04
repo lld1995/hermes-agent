@@ -1,0 +1,8 @@
+2024-01-15 10:23:45 [WARN] Suspicious connection from 146.19.173.32 port 443 - TLS handshake completed
+2024-01-15 10:24:01 [INFO] DNS query for 0-101.com resolved to 104.21.234.56
+2024-01-15 10:25:12 [WARN] Outbound connection to 8.8.8.8 port 53 - DNS lookup
+2024-01-15 10:26:33 [ERROR] Failed login attempt from 185.220.101.42 - brute force detected
+2024-01-15 10:27:45 [WARN] Beacon activity detected: callback to malware-c2.evil.com every 60s
+2024-01-15 10:28:01 [INFO] HTTP request to suspicious-domain.xyz/payload.bin blocked by firewall
+2024-01-15 10:29:15 [ERROR] Data exfiltration attempt: 45.33.32.156 uploading 2.3MB to external server
+2024-01-15 10:30:22 [WARN] Port scan detected from 198.51.100.23 targeting ports 22,80,443,3389

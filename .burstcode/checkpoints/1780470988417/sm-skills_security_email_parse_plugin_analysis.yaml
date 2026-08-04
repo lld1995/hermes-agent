@@ -1,0 +1,164 @@
+capabilities:
+  - email_upload
+  - email_threat_detection
+  - email_report
+  - attachment_analysis
+
+scenario_matchers:
+  strongSignals:
+    - 邮件威胁
+    - 钓鱼邮件
+    - 邮件检测
+    - 邮件上传
+    - 邮件解析
+    - email parse
+    - email upload
+    - 敏感邮件
+    - 附件威胁
+    - 异常附件
+    - 邮件报告
+    - eml上传
+  mimeTypes:
+    - application/zip
+    - message/rfc822
+  fileExtensions:
+    - eml
+    - zip
+
+requirements:
+  - id: email_file
+    description: "待上传的邮件文件（.eml/.zip），通过本地文件路径提供"
+    source: local_file
+  - id: email_parse_api
+    description: "邮件威胁检测系统地址（通过 EMAIL_PARSE_BASE_URL 环境变量注入）"
+    source: environment
+
+commands:
+  - action: upload_email
+    template: "upload_email --task-name <task_name> --file-path <file_path> --fishing <fishing> --sensitive <sensitive> --analyse-content <analyse_content> --analyse-attachment <analyse_attachment> --enable-ocr <enable_ocr> --sandbox-enable <sandbox_enable> --sandbox-detect-type <sandbox_detect_type> --ai-content-detection <ai_content_detection> --virtual <virtual> --lang-content <lang_content> --lang-attachment <lang_attachment> --translate-content <translate_content> --translate-attachment <translate_attachment>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - name: task_name
+        description: "任务名称，可自拟"
+      - name: file_path
+        description: "本地邮件文件路径(.eml/.zip)"
+      - name: fishing
+        default: "true"
+      - name: sensitive
+        default: "true"
+      - name: analyse_content
+        default: "true"
+      - name: analyse_attachment
+        default: "true"
+      - name: enable_ocr
+        default: "false"
+      - name: sandbox_enable
+        default: "false"
+      - name: sandbox_detect_type
+        default: "STATIC"
+      - name: ai_content_detection
+        default: "false"
+      - name: virtual
+        default: "false"
+      - name: lang_content
+        default: "false"
+      - name: lang_attachment
+        default: "false"
+      - name: translate_content
+        default: "false"
+      - name: translate_attachment
+        default: "false"
+
+  - action: get_task_report
+    template: "get_task_report --task-id <task_id> --report-name <report_name>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - name: task_id
+        description: "任务ID，来自 upload_email 返回的 taskId"
+      - name: report_name
+        description: "报告名称，可选值: 邮件内容解读报告 / 邮件安全分析报告 / 邮件敏感检测报告 / 邮件威胁综合分析报告"
+        default: "邮件威胁综合分析报告"
+
+  - action: fetch_email_report
+    template: "fetch_email_report --external-job-id <external_job_id> --report-name <report_name>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - name: external_job_id
+        description: "异步任务 externalJobId，由 async_job.submit 返回"
+      - name: report_name
+        description: "报告名称，可选值: 邮件内容解读报告 / 邮件安全分析报告 / 邮件敏感检测报告 / 邮件威胁综合分析报告"
+        default: "邮件威胁综合分析报告"
+
+  - action: query_email_job
+    template: "query_email_job --external-job-id <external_job_id>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - name: external_job_id
+        description: "异步任务 externalJobId，由 async_job.submit 返回"
+
+  - action: callback_email_job
+    template: "callback_email_job --callback-external-job-id <callback_external_job_id> --callback-external-status <callback_external_status> --callback-terminal <callback_terminal> --callback-success <callback_success>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - name: callback_external_job_id
+        description: "回调携带的 externalJobId"
+      - name: callback_external_status
+        description: "回调携带的外部状态"
+      - name: callback_terminal
+        description: "回调是否为终态"
+      - name: callback_success
+        description: "回调是否成功"
+
+  - action: list_emails
+    template: "list_emails --task-id <task_id> --current <current> --count <count> --app-type <app_type>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - task_id
+      - app_type
+      - current
+      - count
+
+  - action: list_attachments
+    template: "list_attachments --task-id <task_id> --current <current> --count <count>"
+    kind: python_script
+    asset_path: scripts/email_parse.py
+    placeholders:
+      - task_id
+      - current
+      - count
+
+planningGuidance: |
+  强制执行流程: async_job.prepare → async_job.submit → run.suspend → (等待回调恢复) → async_job.finalize。
+  async_job.prepare 的 handlerKey 必须为 packaged_skill，handlerConfig.skillName 固定为 Email Parse Plugin。
+  handlerConfig.submitAction/queryAction/fetchAction/callbackAction 必须分别固定为 upload_email / query_email_job / fetch_email_report / callback_email_job。
+  async_job.submit 成功后必须立即调用 run.suspend 挂起会话，禁止跳过 suspend/resume 边界直接调用 get_task_report。
+  若用户在恢复后继续追问原始报告数据，可额外调用 get_task_report；默认面向用户的恢复结果由 async_job.finalize 输出。
+  upload_email 默认使用 detection_mode=5（自定义），主链路不再传递 detection_mode；report_name 必须为中文全称（默认：邮件威胁综合分析报告）。
+
+prompt_guidance:
+  final_answer_requirements:
+    - "【强制】主异步链路必须使用 async_job.prepare → async_job.submit → run.suspend → async_job.finalize，禁止跳过 suspend/resume 边界"
+    - "async_job.prepare.handlerKey 固定为 packaged_skill，handlerConfig.skillName 固定为 Email Parse Plugin"
+    - "handlerConfig.submitAction/queryAction/fetchAction/callbackAction 必须分别使用 upload_email/query_email_job/fetch_email_report/callback_email_job"
+    - "只有在用户明确追问原始报告明细时，才直接调用 get_task_report"
+    - "报告内容原样输出，禁止改写"
+    - "list_emails 和 list_attachments 仅在用户追问时按需调用"
+    - "非 2xx 响应时报告错误，不推测结果"
+    - "upload_email 默认使用 detection_mode=5（自定义），主链路不传 detection_mode；report_name 只允许填中文全称"
+
+report_sections:
+  - id: task_summary
+    title: "任务概要"
+    description: "包含 taskId、任务状态、邮件数量、检测模式等基础信息"
+  - id: threat_statistics
+    title: "威胁统计"
+    description: "包含各威胁级别的邮件/附件数量分布"
+  - id: high_risk_emails
+    title: "高风险邮件"
+    description: "threatLevel >= 3 的邮件列表及其威胁指标"

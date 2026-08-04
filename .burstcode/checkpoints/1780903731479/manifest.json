@@ -1,0 +1,154 @@
+{
+  "label": "prompt: 改了下代码，更新镜像20260602并push到docker仓储",
+  "createdAt": 1780903731479,
+  "baseRef": "file:1780477387433",
+  "chainDepth": 2,
+  "files": [
+    {
+      "relativePath": "Dockerfile"
+    },
+    {
+      "relativePath": "agent/agent_init.py"
+    },
+    {
+      "relativePath": "agent/chat_completion_helpers.py"
+    },
+    {
+      "relativePath": "agent/conversation_loop.py"
+    },
+    {
+      "relativePath": "agent/think_scrubber.py"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/chat/sidebar/index.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/command-center/index.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/constants.ts"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/index.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/tools-settings.test.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/tools-settings.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/toolset-config-panel.test.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/toolset-config-panel.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/settings/types.ts"
+    },
+    {
+      "relativePath": "apps/desktop/src/app/skills/index.tsx"
+    },
+    {
+      "relativePath": "apps/desktop/src/types/hermes.ts"
+    },
+    {
+      "relativePath": "cron/scheduler.py"
+    },
+    {
+      "relativePath": "docker/main-wrapper.sh"
+    },
+    {
+      "relativePath": "gateway/config.py"
+    },
+    {
+      "relativePath": "gateway/platforms/api_server.py"
+    },
+    {
+      "relativePath": "gateway/platforms/base.py"
+    },
+    {
+      "relativePath": "gateway/platforms/telegram.py"
+    },
+    {
+      "relativePath": "hermes_cli/config.py"
+    },
+    {
+      "relativePath": "hermes_cli/web_server.py"
+    },
+    {
+      "relativePath": "hermes_cli/dashboard_auth/middleware.py"
+    },
+    {
+      "relativePath": "plugins/dashboard_auth/nous/__init__.py"
+    },
+    {
+      "relativePath": "tests/test_docker_home_override_scripts.py"
+    },
+    {
+      "relativePath": "tests/agent/test_minimax_provider.py"
+    },
+    {
+      "relativePath": "tests/agent/test_think_scrubber.py"
+    },
+    {
+      "relativePath": "tests/cron/test_cron_prompt_injection_skill.py"
+    },
+    {
+      "relativePath": "tests/gateway/test_api_server.py"
+    },
+    {
+      "relativePath": "tests/gateway/test_api_server_memory.py"
+    },
+    {
+      "relativePath": "tests/gateway/test_config.py"
+    },
+    {
+      "relativePath": "tests/hermes_cli/test_dashboard_auth_401_reauth.py"
+    },
+    {
+      "relativePath": "tests/hermes_cli/test_web_server.py"
+    },
+    {
+      "relativePath": "tests/plugins/dashboard_auth/test_nous_provider.py"
+    },
+    {
+      "relativePath": "tests/tools/test_cronjob_tools.py"
+    },
+    {
+      "relativePath": "tests/tools/test_memory_tool.py"
+    },
+    {
+      "relativePath": "tests/tools/test_skill_manager_tool.py"
+    },
+    {
+      "relativePath": "tools/computer_use_tool.py"
+    },
+    {
+      "relativePath": "tools/cronjob_tools.py"
+    },
+    {
+      "relativePath": "tools/memory_tool.py"
+    },
+    {
+      "relativePath": "tools/skill_manager_tool.py"
+    },
+    {
+      "relativePath": "web/src/App.tsx"
+    },
+    {
+      "relativePath": "web/src/lib/api.ts"
+    },
+    {
+      "relativePath": "website/docs/user-guide/features/web-dashboard.md"
+    }
+  ],
+  "deleted": [
+    "apps/desktop/src/app/skills/index.test.tsx",
+    "gateway/stream_dispatch.py",
+    "gateway/stream_events.py",
+    "tests/gateway/test_stream_events.py",
+    "tests/gateway/test_telegram_send_draft_format.py",
+    "web/src/pages/ChannelsPage.tsx"
+  ]
+}

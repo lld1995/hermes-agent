@@ -17,8 +17,10 @@ Exposes an HTTP server with endpoints:
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
-- POST /v1/runs/{run_id}/approval — resolve a pending run approval
-- POST /v1/runs/{run_id}/stop       — interrupt a running agent
+- POST /v1/runs/{run_id}/approval  — resolve a pending run approval
+- POST /v1/runs/{run_id}/stop      — interrupt a running agent
+- GET  /api/memory                 — list curated memory entries (MEMORY.md / USER.md)
+- DELETE /api/memory               — clear or remove curated memory entries
 - GET  /health                     — health check
 - GET  /health/detailed            — rich status for cross-container dashboard probing
 
@@ -700,6 +702,14 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
+        # Tool calls transparency: when enabled, /v1/chat/completions returns
+        # tool_calls in the message even though the agent executed them automatically.
+        # Disabled by default to maintain standard OpenAI semantics where tool_calls
+        # implies the client should execute them.
+        self._expose_tool_calls: bool = _coerce_request_bool(
+            extra.get("expose_tool_calls", os.getenv("API_SERVER_EXPOSE_TOOL_CALLS", "false")),
+            default=False,
+        )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -957,10 +967,12 @@ class APIServerAdapter(BasePlatformAdapter):
         self,
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        requested_model: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         gateway_session_key: Optional[str] = None,
     ) -> Any:
         """
@@ -982,9 +994,10 @@ class APIServerAdapter(BasePlatformAdapter):
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
         from hermes_cli.tools_config import _get_platform_tools
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs = _resolve_runtime_agent_kwargs(target_model=requested_model)
         reasoning_config = GatewayRunner._load_reasoning_config()
-        model = _resolve_gateway_model()
+        runtime_model = runtime_kwargs.pop("model", None)
+        model = requested_model or runtime_model or _resolve_gateway_model()
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -1009,12 +1022,24 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            reasoning_callback=reasoning_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
         )
         return agent
+
+    def _resolve_request_model(self, body: Dict[str, Any]):
+        raw_model = body.get("model")
+        if not isinstance(raw_model, str):
+            return self._model_name, None
+        model = raw_model.strip()
+        if not model:
+            return self._model_name, None
+        if model == self._model_name:
+            return model, None
+        return model, model
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -1783,7 +1808,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # history already set from request body above
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-        model_name = body.get("model", self._model_name)
+        model_name, requested_model = self._resolve_request_model(body)
         created = int(time.time())
 
         if stream:
@@ -1819,6 +1844,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 Skips tools whose names start with ``_`` so internal
                 events (``_thinking``, …) stay off the wire — matching
                 the prior ``_on_tool_progress`` filter exactly.
+
+                When expose_tool_calls is enabled, also emits standard
+                OpenAI tool_calls format for transparency.
                 """
                 if not tool_call_id or function_name.startswith("_"):
                     return
@@ -1833,12 +1861,26 @@ class APIServerAdapter(BasePlatformAdapter):
                     "status": "running",
                 }))
 
+                # When expose_tool_calls is enabled, emit standard OpenAI format
+                if self._expose_tool_calls:
+                    _stream_q.put(("__tool_call_start__", {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": function_name,
+                            "arguments": json.dumps(function_args) if isinstance(function_args, dict) else str(function_args or ""),
+                        }
+                    }))
+
             def _on_tool_complete(tool_call_id, function_name, function_args, function_result):
                 """Emit the matching ``status: completed`` event.
 
                 Dropped if the start was filtered (internal tool, missing
                 id, or never seen) so clients never get an orphaned
                 ``completed`` they can't correlate to a prior ``running``.
+
+                When expose_tool_calls is enabled, also emits tool result
+                as a custom event for observability.
                 """
                 if not tool_call_id or tool_call_id not in _started_tool_call_ids:
                     return
@@ -1848,6 +1890,41 @@ class APIServerAdapter(BasePlatformAdapter):
                     "toolCallId": tool_call_id,
                     "status": "completed",
                 }))
+
+                # When expose_tool_calls is enabled, emit tool result
+                if self._expose_tool_calls:
+                    _stream_q.put(("__tool_call_result__", {
+                        "tool_call_id": tool_call_id,
+                        "name": function_name,
+                        "content": json.dumps(function_result) if not isinstance(function_result, str) else function_result,
+                    }))
+
+            def _on_reasoning(text):
+                """Forward chain-of-thought tokens to the SSE stream as a
+                dedicated ``delta.reasoning_content`` chunk.
+
+                Unifies two upstream reasoning sources:
+
+                  * A-class — structured ``delta.reasoning_content`` from
+                    DeepSeek/Moonshot/Kimi/GLM/MiniMax/Tencent thinking
+                    modes; arrives via ``run_agent._fire_reasoning_delta``
+                    on the model's reasoning channel.
+                  * B-class — ``<think>`` / ``<thinking>`` / ``<reasoning>``
+                    inline tags from open-weights models (Qwen3 thinking,
+                    finetunes following the DeepSeek-R1 prompt template,
+                    MiniMax-M2.7, etc.); the ``StreamingThinkScrubber``
+                    now surfaces the scrubbed-out text alongside the
+                    visible delta and ``_fire_stream_delta`` routes it
+                    through ``_fire_reasoning_delta`` as well.
+
+                Both arrive here as plain text and are emitted on the
+                SSE wire as ``{"choices":[{"delta":{"reasoning_content":
+                "…"}}]}`` — the de-facto OpenAI-compatible field popularised
+                by DeepSeek and consumed natively by OpenWebUI, Lobe
+                Chat, ChatGPT-Next-Web, Cline, Cursor, Continue, …
+                """
+                if text:
+                    _stream_q.put(("__reasoning__", text))
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -1866,8 +1943,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
+                reasoning_callback=_on_reasoning,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                requested_model=requested_model,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1887,6 +1966,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                requested_model=requested_model,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1953,18 +2033,26 @@ class APIServerAdapter(BasePlatformAdapter):
         # Soft-partial path: we have *some* text but the run did not complete
         # (e.g. truncation with partial buffered output). Still 200 but signal
         # truncation via finish_reason="length" + Hermes-specific extras.
+        #
+        # Prefer the upstream-reported model id when present so clients see
+        # the concrete backend a routing gateway actually served (e.g. an
+        # alias "high-accuracy" → "high-accuracy-m3"). Fall back to the
+        # client-supplied name when the upstream did not advertise one.
+        upstream_model = result.get("last_response_model")
+        response_model = upstream_model if isinstance(upstream_model, str) and upstream_model else model_name
+
+        # Build assistant message with optional tool_calls transparency
+        assistant_message = self._build_chat_completion_message(result, final_response)
+
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
-            "model": model_name,
+            "model": response_model,
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": final_response,
-                    },
+                    "message": assistant_message,
                     "finish_reason": finish_reason,
                 }
             ],
@@ -2032,21 +2120,87 @@ class APIServerAdapter(BasePlatformAdapter):
             await response.write(f"data: {json.dumps(role_chunk)}\n\n".encode())
             last_activity = time.monotonic()
 
+            # Track emitted tool_calls for proper indexing
+            _emitted_tool_calls: List[Dict[str, Any]] = []
+
             # Helper — route a queue item to the correct SSE event.
             async def _emit(item):
                 """Write a single queue item to the SSE stream.
 
                 Plain strings are sent as normal ``delta.content`` chunks.
-                Tagged tuples ``("__tool_progress__", payload)`` are sent
-                as a custom ``event: hermes.tool.progress`` SSE event so
-                frontends can display them without storing the markers in
-                conversation history.  See #6972 for the original event,
-                #16588 for the ``toolCallId``/``status`` lifecycle fields.
+
+                Tagged tuples are routed to dedicated channels so frontends
+                can display them without contaminating ``delta.content`` /
+                conversation history:
+
+                  * ``("__tool_progress__", payload)`` → custom
+                    ``event: hermes.tool.progress`` SSE event
+                    (#6972 / #16588).
+                  * ``("__reasoning__", text)`` → standard
+                    ``chat.completion.chunk`` carrying
+                    ``delta.reasoning_content`` — the de-facto
+                    OpenAI-compatible reasoning field popularised by
+                    DeepSeek and natively understood by OpenWebUI /
+                    Lobe Chat / ChatGPT-Next-Web / Cline / Continue.
+                    Unifies A-class (structured ``reasoning_content``
+                    from thinking models) and B-class (``<think>`` tags
+                    recovered by ``StreamingThinkScrubber``) reasoning
+                    on a single wire format.
+                  * ``("__tool_call_start__", payload)`` → standard
+                    ``chat.completion.chunk`` carrying ``delta.tool_calls``
+                    (when expose_tool_calls is enabled).
+                  * ``("__tool_call_result__", payload)`` → custom
+                    ``event: hermes.tool.result`` for observability
+                    (when expose_tool_calls is enabled).
                 """
+                nonlocal _emitted_tool_calls
                 if isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_progress__":
                     event_data = json.dumps(item[1])
                     await response.write(
                         f"event: hermes.tool.progress\ndata: {event_data}\n\n".encode()
+                    )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__reasoning__":
+                    reasoning_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"reasoning_content": item[1]},
+                            "finish_reason": None,
+                        }],
+                    }
+                    await response.write(
+                        f"data: {json.dumps(reasoning_chunk, ensure_ascii=False)}\n\n".encode()
+                    )
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_call_start__":
+                    # Emit standard OpenAI tool_calls delta chunk
+                    tool_call = item[1]
+                    tool_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": len(_emitted_tool_calls),
+                                    "id": tool_call["id"],
+                                    "type": tool_call["type"],
+                                    "function": tool_call["function"],
+                                }]
+                            },
+                            "finish_reason": None,
+                        }],
+                    }
+                    _emitted_tool_calls.append(tool_call)
+                    await response.write(f"data: {json.dumps(tool_chunk)}\n\n".encode())
+                elif isinstance(item, tuple) and len(item) == 2 and item[0] == "__tool_call_result__":
+                    # Emit custom event for tool result (for observability)
+                    # Note: Standard OpenAI API expects clients to send tool results,
+                    # but since we're an agent that auto-executes, we emit this as
+                    # a custom event for transparency.
+                    result_data = item[1]
+                    await response.write(
+                        f"event: hermes.tool.result\ndata: {json.dumps(result_data)}\n\n".encode()
                     )
                 else:
                     content_chunk = {
@@ -3277,6 +3431,112 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response({"error": str(e)}, status=500)
 
     # ------------------------------------------------------------------
+    # Memory management API
+    #
+    # The built-in ``memory`` tool persists curated entries to
+    # ``~/.hermes/memories/MEMORY.md`` (agent notes) and ``USER.md``
+    # (user profile).  These two endpoints expose the stores to a
+    # management backend so it can list and prune entries without
+    # shelling out to ``hermes memory reset``.
+    #
+    # Note: this only covers the built-in file-backed store.  External
+    # memory providers (Honcho, retaindb, supermemory, ...) have their
+    # own delete APIs and are not proxied here.
+    # ------------------------------------------------------------------
+
+    _VALID_MEMORY_TARGETS = ("all", "memory", "user")
+
+    @staticmethod
+    def _parse_memory_target(request: "web.Request") -> tuple[str, Optional["web.Response"]]:
+        target = (request.query.get("target") or "all").strip().lower()
+        if target not in APIServerAdapter._VALID_MEMORY_TARGETS:
+            return target, web.json_response(
+                {"error": "target must be one of 'all', 'memory', 'user'"},
+                status=400,
+            )
+        return target, None
+
+    async def _handle_get_memory(self, request: "web.Request") -> "web.Response":
+        """GET /api/memory[?target=memory|user|all] — list curated memory entries.
+
+        Returns a JSON object keyed by target name; each value contains the
+        entries plus usage stats (char_count, char_limit, usage_percent).
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        target, target_err = self._parse_memory_target(request)
+        if target_err is not None:
+            return target_err
+        try:
+            from tools.memory_tool import MemoryStore
+            store = MemoryStore()
+            store.load_from_disk()
+            targets = ("memory", "user") if target == "all" else (target,)
+            payload = {t: store.snapshot(t) for t in targets}
+            return web.json_response(payload)
+        except Exception as e:
+            logger.exception("Failed to read memory")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_delete_memory(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/memory[?target=memory|user|all][&old_text=...].
+
+        Two modes:
+        - With ``old_text``: removes the single entry containing that
+          substring from the given target (target must be ``memory`` or
+          ``user``, not ``all``).
+        - Without ``old_text``: clears every entry from the target(s).
+          With ``target=all`` (default), both stores are wiped.
+
+        The on-disk file is rewritten atomically.  The system-prompt
+        snapshot of any already-running session is unaffected — those
+        sessions need to restart to see the change, just like ``hermes
+        memory reset``.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        target, target_err = self._parse_memory_target(request)
+        if target_err is not None:
+            return target_err
+        old_text = (request.query.get("old_text") or "").strip()
+        try:
+            from tools.memory_tool import MemoryStore
+            store = MemoryStore()
+            if old_text:
+                if target == "all":
+                    return web.json_response(
+                        {"error": "old_text requires target='memory' or target='user'"},
+                        status=400,
+                    )
+                result = store.remove(target, old_text)
+                if not result.get("success"):
+                    return web.json_response(
+                        {"error": result.get("error", "Entry not found"), "matches": result.get("matches")},
+                        status=404 if "No entry matched" in str(result.get("error", "")) else 400,
+                    )
+                return web.json_response({
+                    "ok": True,
+                    "target": target,
+                    "removed": old_text,
+                    "remaining": store.snapshot(target),
+                })
+
+            targets = ("memory", "user") if target == "all" else (target,)
+            cleared = {}
+            for t in targets:
+                result = store.clear(t)
+                cleared[t] = {
+                    "removed": result.get("removed", 0),
+                    "entry_count": result.get("entry_count", 0),
+                }
+            return web.json_response({"ok": True, "target": target, "cleared": cleared})
+        except Exception as e:
+            logger.exception("Failed to delete memory")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # Output extraction helper
     # ------------------------------------------------------------------
 
@@ -3419,6 +3679,42 @@ class APIServerAdapter(BasePlatformAdapter):
         })
         return items
 
+    def _build_chat_completion_message(
+        self, result: Dict[str, Any], final_response: str
+    ) -> Dict[str, Any]:
+        """Build a Chat Completions message with optional tool_calls transparency.
+
+        When expose_tool_calls is enabled, includes tool_calls that the agent
+        executed automatically. This provides full observability of the agent's
+        reasoning process while maintaining OpenAI-compatible message format.
+
+        Note: Unlike standard OpenAI tool calling where tool_calls means "client
+        should execute these", here the tools have already been executed by the
+        agent. The tool_calls field is for transparency/observability only.
+        """
+        message = {
+            "role": "assistant",
+            "content": final_response,
+        }
+
+        if not self._expose_tool_calls:
+            return message
+
+        # Extract tool_calls from agent's message history
+        tool_calls = []
+        messages = result.get("messages", [])
+
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Collect all tool calls from assistant messages
+                for tc in msg["tool_calls"]:
+                    tool_calls.append(tc)
+
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        return message
+
     # ------------------------------------------------------------------
     # Agent execution
     # ------------------------------------------------------------------
@@ -3433,8 +3729,10 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        reasoning_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        requested_model: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3457,7 +3755,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
+                reasoning_callback=reasoning_callback,
                 gateway_session_key=gateway_session_key,
+                requested_model=requested_model,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -4119,6 +4419,9 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Curated memory management API (built-in MEMORY.md / USER.md)
+            self._app.router.add_get("/api/memory", self._handle_get_memory)
+            self._app.router.add_delete("/api/memory", self._handle_delete_memory)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)

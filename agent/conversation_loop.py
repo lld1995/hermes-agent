@@ -1308,6 +1308,16 @@ def run_conversation(
                     response = agent._interruptible_api_call(api_kwargs)
                 
                 api_duration = time.time() - api_start_time
+
+                # Capture the upstream-reported model id (e.g. routing
+                # gateways that turn "high-accuracy" into "high-accuracy-m3").
+                # We stamp this on every successful response so the last
+                # assignment reflects the final turn; falsy values are
+                # ignored so a provider that omits the field doesn't blank
+                # out an earlier known value.
+                _resp_model = getattr(response, "model", None)
+                if isinstance(_resp_model, str) and _resp_model:
+                    agent._last_response_model = _resp_model
                 
                 # Stop thinking spinner silently -- the response box or tool
                 # execution messages that follow are more informative.
@@ -4657,6 +4667,7 @@ def run_conversation(
         "response_transformed": _response_transformed,
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         "model": agent.model,
+        "last_response_model": getattr(agent, "_last_response_model", None),
         "provider": agent.provider,
         "base_url": agent.base_url,
         "input_tokens": agent.session_input_tokens,

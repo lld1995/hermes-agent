@@ -1163,14 +1163,16 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(*, target_model: str | None = None) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     Provider is read from ``config.yaml`` ``model.provider`` (the single
     source of truth). ``resolve_runtime_provider()`` falls through to env
     var lookups internally for legacy compatibility, but the gateway does
     not consult environment variables for behavioral config — config.yaml
-    is authoritative.
+    is authoritative. When a caller explicitly selects a model, ``target_model``
+    ensures provider-specific routing is derived from that model rather than
+    the persisted config default.
 
     If the primary provider fails with an authentication error, attempt to
     resolve credentials using the fallback provider chain from config.yaml
@@ -1183,7 +1185,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
     try:
-        runtime = resolve_runtime_provider()
+        runtime = resolve_runtime_provider(target_model=target_model)
     except AuthError as auth_exc:
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked

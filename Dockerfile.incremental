@@ -1,0 +1,16 @@
+# ---------- Incremental build on top of hermes-agent:test ----------
+# Adds: external model override fix (api_server + runtime kwargs).
+# Build:
+#   docker build -f Dockerfile.incremental \
+#     -t docker.westsnow.cn/hermes-agent:test \
+#     -t docker.westsnow.cn/hermes-agent:20260720 .
+#
+FROM docker.westsnow.cn/hermes-agent:test
+
+USER root
+
+# Copy only the files changed for the external model override fix.
+COPY --chown=hermes:hermes gateway/run.py /opt/hermes/gateway/run.py
+COPY --chown=hermes:hermes gateway/platforms/api_server.py /opt/hermes/gateway/platforms/api_server.py
+
+USER hermes

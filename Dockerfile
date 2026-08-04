@@ -1,13 +1,40 @@
-FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
+# ---------- CN mirror configuration (override with --build-arg to disable) ----------
+# Registry mirrors (ghcr.io not reachable in CN; docker.m.daocloud.io preserves
+# upstream digests so sha256 pinning still validates integrity).
+ARG GHCR_MIRROR=ghcr.m.daocloud.io
+ARG DOCKERHUB_MIRROR=docker.m.daocloud.io
+# Package mirrors
+ARG APT_MIRROR=mirrors.aliyun.com
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+# pip / uv go upstream pypi.org via PIP_PROXY (CN aliyun mirror's torch /
+# onnxruntime / ctranslate2 wheels were observed at <1MB/s in this network;
+# upstream pypi behind the local HTTP proxy is faster and more reliable).
+# Override PIP_PROXY with --build-arg if no proxy is available.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=pypi.org
+ARG PIP_PROXY=""
+
+FROM ${GHCR_MIRROR}/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
 # Node 22 LTS source stage. Debian trixie's bundled nodejs is pinned to 20.x
 # which reached EOL in April 2026 — we copy node + npm + corepack from the
 # upstream node:22 image instead so we can stay on a supported LTS without
 # waiting for Debian 14 (forky, ~mid-2027).  Bookworm-based slim image used
 # so the produced binary links against glibc 2.36, which runs cleanly on
 # our Debian 13 (trixie, glibc 2.41) runtime.  Bumping to a new Node major
-# is a one-line ARG change; see #4977.
-FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
-FROM debian:13.4
+# is a one-line ARG change; see #4977. Pulled via DOCKERHUB_MIRROR so the
+# node base image is reachable in CN (digest pin preserves integrity).
+FROM ${DOCKERHUB_MIRROR}/library/node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
+FROM ${DOCKERHUB_MIRROR}/library/debian:13.4
+
+# Re-declare ARGs that need to be visible in this stage (ARGs before FROM are
+# only available to the FROM line itself).
+ARG APT_MIRROR
+ARG NPM_REGISTRY
+ARG PLAYWRIGHT_DOWNLOAD_HOST
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+ARG PIP_PROXY
 
 # Disable Python stdout buffering to ensure logs are printed immediately
 ENV PYTHONUNBUFFERED=1
@@ -16,6 +43,19 @@ ENV PYTHONUNBUFFERED=1
 # install survives the /opt/data volume overlay at runtime.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 
+# Shared uv cache directory for both the root-stage `uv sync` and the
+# hermes-stage `uv pip install -e` so they hit the same BuildKit cache
+# mount and never re-download wheels across rebuilds (#cache_mount).
+ENV UV_CACHE_DIR=/build-cache/uv
+
+# Swap Debian sources to the CN mirror (trixie uses deb822-style sources).
+# If APT_MIRROR is set to the upstream deb.debian.org this is a no-op.
+RUN set -eux; \
+    if [ "${APT_MIRROR}" != "deb.debian.org" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+            /etc/apt/sources.list.d/debian.sources; \
+    fi
+
 # Install system dependencies in one layer, clear APT cache.
 # tini was previously PID 1 to reap orphaned zombie processes (MCP stdio
 # subprocesses, git, bun, etc.) that would otherwise accumulate when hermes
@@ -23,9 +63,14 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # replaces tini with s6-overlay's /init (PID 1 = s6-svscan), which reaps
 # zombies non-blockingly on SIGCHLD and additionally supervises the main
 # hermes process, the dashboard, and per-profile gateways.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli xz-utils && \
+# node/npm now come from the node_source stage (see COPY below), so they are
+# intentionally NOT installed via apt here. build-essential is kept so native
+# Python extensions still compile during `uv sync`. xz-utils is required to
+# unpack the s6-overlay tarballs.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli xz-utils \
+    unzip tshark wireshark-common && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- s6-overlay install ----------
@@ -85,6 +130,26 @@ RUN set -eu; \
     # ENTRYPOINT. Safe to drop once the affected catalogs are updated.\
     ln -sf /init /usr/bin/tini
 
+# ---------- Custom Suricata offline package ----------
+# This vendor build targets CentOS/RHEL 7 on x86_64 and bundles most runtime
+# libraries. Install it only for amd64 images and fail clearly on other arches.
+# Debian trixie exposes libpcap's ABI-compatible library as libpcap.so.0.8;
+# the vendor binary requests the legacy libpcap.so.1 SONAME, so provide it.
+COPY custom/suricata-offline-package-20260731-174922.tar.gz /tmp/
+RUN set -eux; \
+    if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
+        echo "The bundled Suricata package supports amd64 only (TARGETARCH=${TARGETARCH:-unknown})" >&2; \
+        exit 1; \
+    fi; \
+    mkdir -p /tmp/suricata-install; \
+    tar -xzf /tmp/suricata-offline-package-20260731-174922.tar.gz -C /tmp/suricata-install; \
+    /tmp/suricata-install/suricata-offline-package/install.sh; \
+    ln -sf /usr/lib/x86_64-linux-gnu/libpcap.so.0.8 /usr/lib/x86_64-linux-gnu/libpcap.so.1; \
+    rm -rf /tmp/suricata-install /tmp/suricata-offline-package-20260731-174922.tar.gz /tmp/suricata_backup_*; \
+    test -x /opt/cstsas/suricata/bin/suricata; \
+    ! ldd /opt/cstsas/suricata/bin/suricata | grep -q 'not found'; \
+    /opt/cstsas/suricata/bin/suricata --build-info >/dev/null
+
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
 
@@ -103,6 +168,15 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && 
     ln -sf /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 
 WORKDIR /opt/hermes
+
+# Configure npm + pip globally so any `npm install` / `pip install` picks up
+# the CN mirrors automatically (also inherited by `npx` and uv's pip).
+RUN npm config set registry "${NPM_REGISTRY}" && \
+    npm config set fetch-timeout 600000 && \
+    npm config set fetch-retries 5 && \
+    mkdir -p /etc/pip && \
+    printf '[global]\nindex-url = %s\ntrusted-host = %s\ntimeout = 120\n' \
+        "${PIP_INDEX_URL}" "${PIP_TRUSTED_HOST}" > /etc/pip.conf
 
 # ---------- Layer-cached dependency install ----------
 # Copy only package manifests first so npm install + Playwright are cached
@@ -129,10 +203,26 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
 
-RUN npm install --prefer-offline --no-audit && \
-    npx playwright install --with-deps chromium --only-shell && \
+# Optional proxy for playwright only (npmmirror does not mirror the newer
+# `builds/cft/` path used by chrome-headless-shell, so we fall back to upstream
+# playwright.azureedge.net via the configured proxy when PLAYWRIGHT_PROXY is set).
+ARG PLAYWRIGHT_PROXY=""
+
+# npm install uses npmmirror (fast in CN). Skip playwright's postinstall browser
+# download here; we do it in a separate RUN below so we can scope the proxy.
+# `--mount=type=cache,target=/root/.npm` persists the npm tarball cache across
+# rebuilds so a busted upstream layer doesn't re-download the npm registry.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 && \
+    npm install --prefer-offline --no-audit && \
     (cd web && npm install --prefer-offline --no-audit) && \
-    (cd ui-tui && npm install --prefer-offline --no-audit) && \
+    (cd ui-tui && npm install --prefer-offline --no-audit)
+
+# Install chromium-headless-shell from the configured Playwright mirror. The
+# npmmirror builds/cft endpoint is reachable in CN, while its upstream fallback
+# redirects to Google Storage, which may be unreachable from the build network.
+RUN HTTPS_PROXY="${PLAYWRIGHT_PROXY}" HTTP_PROXY="${PLAYWRIGHT_PROXY}" \
+    npx playwright install --with-deps chromium --only-shell && \
     npm cache clean --force
 
 # ---------- Layer-cached Python dependency install ----------
@@ -162,7 +252,32 @@ RUN npm install --prefer-offline --no-audit && \
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity
+# `--mount=type=cache,target=${UV_CACHE_DIR}` persists uv's wheel cache across
+# rebuilds so a busted upstream layer doesn't re-download every wheel from
+# pypi.  uid=10000/gid=10000 so the later hermes-user `uv pip install` step
+# can share the same cache without permission issues (root can still write).
+# Extras list tracks upstream main: [all] (production handpicked set) plus
+# messaging adapters and the anthropic/bedrock/azure-identity provider packages
+# so Docker users get them without runtime lazy-install access to PyPI.
+RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked \
+    HTTPS_PROXY="${PIP_PROXY}" HTTP_PROXY="${PIP_PROXY}" \
+    uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity && \
+    HTTPS_PROXY="${PIP_PROXY}" HTTP_PROXY="${PIP_PROXY}" \
+    uv pip install --python /opt/hermes/.venv/bin/python \
+        "python-docx==1.2.0" \
+        "cryptography==46.0.7" \
+        "pycryptodome==3.23.0" \
+        "numpy==2.4.3" \
+        "scapy==2.7.0" \
+        "pyshark==0.6" && \
+    venv_site_packages="$(/opt/hermes/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
+    system_site_packages="$(/usr/bin/python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    printf '%s\n' "${venv_site_packages}" > "${system_site_packages}/hermes-analysis-libs.pth" && \
+    /opt/hermes/.venv/bin/python -c \
+        'import docx, cryptography, Crypto, numpy, scapy, pyshark; print("Hermes venv analysis dependencies OK")' && \
+    /usr/bin/python3 -c \
+        'import docx, cryptography, Crypto, numpy, scapy, pyshark; print("System Python analysis dependencies OK")' && \
+    chown -R 10000:10000 /build-cache/uv
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
@@ -193,9 +308,15 @@ RUN chmod -R a+rX /opt/hermes && \
 # run as the default hermes user (UID 10000).
 
 # ---------- Link hermes-agent itself (editable) ----------
-# Deps are already installed in the cached layer above; `--no-deps` makes
-# this a fast (~1s) egg-link creation with no resolution or downloads.
-RUN uv pip install --no-cache-dir --no-deps -e "."
+RUN chown hermes:hermes /opt/hermes
+USER hermes
+ENV UV_INDEX_URL=${PIP_INDEX_URL}
+# Deps are already installed in the cached layer above (`uv sync ... --extra all`),
+# so this is just a fast (~1s) egg-link creation with no resolution or downloads.
+# Cache mount is still attached so any incidental sdist build artefacts hit the
+# shared cache rather than rebuilding from scratch.
+RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked \
+    uv pip install --no-config --no-deps -e "."
 
 # ---------- Bake build-time git revision ----------
 # .dockerignore excludes .git, so `git rev-parse HEAD` from inside the
@@ -236,6 +357,10 @@ COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 # 02-reconcile-profiles re-creates per-profile gateway s6 service
 # slots from $HERMES_HOME/profiles/<name>/ after a container restart
 # (the /run/service/ scandir is tmpfs and wiped on restart). Phase 4.
+# Keep the container's initial user as root for s6/PID 1 and privileged services
+# such as Suricata. main-wrapper.sh and service run scripts explicitly drop
+# Hermes application processes to the unprivileged hermes user.
+USER root
 RUN mkdir -p /etc/cont-init.d && \
     printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \
         > /etc/cont-init.d/01-hermes-setup && \

@@ -1808,21 +1808,37 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     deltas_were_sent["yes"] = True
                 # Tool calls suppress regular content streaming (avoids
                 # displaying chatty "I'll use the tool..." text alongside
-                # tool calls).  But reasoning tags embedded in suppressed
-                # content should still reach the display — otherwise the
-                # reasoning box only appears as a post-response fallback,
-                # rendering it confusingly after the already-streamed
-                # response.  Route suppressed content through the stream
-                # delta callback so its tag extraction can fire the
-                # reasoning display.  Non-reasoning text is harmlessly
-                # suppressed by the CLI's _stream_delta when the stream
-                # box is already closed (tool boundary flush).
-                elif agent.stream_delta_callback:
-                    try:
-                        agent.stream_delta_callback(delta.content)
-                        agent._record_streamed_assistant_text(delta.content)
-                    except Exception:
-                        pass
+                # tool calls).  But reasoning tags (<think>…</think>)
+                # embedded in suppressed content should still reach the
+                # display — otherwise the reasoning box only appears as a
+                # post-response fallback, rendering it confusingly after the
+                # already-streamed response.
+                #
+                # Previously this routed all of delta.content through
+                # stream_delta_callback directly, relying on the CLI's
+                # stream-box-closed state to silently drop the visible
+                # portion.  That assumption does NOT hold for the SSE/API
+                # path (api_server._on_delta) where every non-None value is
+                # unconditionally enqueued and emitted as a text delta chunk,
+                # leaking the "I'll look that up…" preamble to API clients.
+                #
+                # Fix: feed only through the think_scrubber to extract any
+                # embedded reasoning content and route it to the reasoning
+                # channel.  The visible portion (ordinary assistant preamble)
+                # is intentionally discarded — consistent with what the CLI
+                # path already does via the closed stream-box guard.
+                else:
+                    think_scrubber = getattr(agent, "_stream_think_scrubber", None)
+                    if think_scrubber is not None:
+                        try:
+                            _visible, _reasoning = think_scrubber.feed(delta.content or "")
+                            if _reasoning:
+                                agent._fire_reasoning_delta(_reasoning)
+                            # _visible is intentionally dropped: the tool-call
+                            # preamble text must not appear in the SSE stream.
+                        except Exception:
+                            pass
+                    agent._record_streamed_assistant_text(delta.content)
 
             # Accumulate tool call deltas — notify display on first name
             if delta and delta.tool_calls:

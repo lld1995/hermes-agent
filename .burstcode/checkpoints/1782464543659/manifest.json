@@ -1,0 +1,8 @@
+{
+  "label": "prompt: s6-rc: info: service s6rc-oneshot-runner: starting s6-rc:...",
+  "createdAt": 1782464543659,
+  "baseRef": "file:1782442396743",
+  "chainDepth": 19,
+  "files": [],
+  "deleted": []
+}

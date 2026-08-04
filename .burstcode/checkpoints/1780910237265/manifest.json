@@ -1,0 +1,8 @@
+{
+  "label": "prompt: 我改了些代码，可以基于docker.westsnow.cn/hermes-agent:20260602这个镜像构建...",
+  "createdAt": 1780910237265,
+  "baseRef": "file:1780909815114",
+  "chainDepth": 14,
+  "files": [],
+  "deleted": []
+}

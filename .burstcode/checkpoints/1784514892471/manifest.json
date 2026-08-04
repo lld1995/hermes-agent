@@ -1,0 +1,8 @@
+{
+  "label": "prompt: 创建个分支修复问题，就是我现在外部指定了model，但是内部执行时好像还是会用config配置里的模型？排查下问题并修复",
+  "createdAt": 1784514892471,
+  "baseRef": "file:1784514813695",
+  "chainDepth": 2,
+  "files": [],
+  "deleted": []
+}

@@ -1,0 +1,8 @@
+{
+  "label": "prompt: 从/v1 接口调用会把工具调用的结果流式返回码",
+  "createdAt": 1780470242406,
+  "baseRef": "file:1780404578939",
+  "chainDepth": 5,
+  "files": [],
+  "deleted": []
+}

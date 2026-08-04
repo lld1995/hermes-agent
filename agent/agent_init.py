@@ -415,6 +415,14 @@ def init_agent(
     agent._interrupt_thread_signal_pending = False
     agent._client_lock = threading.RLock()
 
+    # Tracks the upstream-reported model id from the last API response.
+    # Routing gateways (e.g. an alias like "high-accuracy" that fans out
+    # to "high-accuracy-m1/m2/m3") populate ``response.model`` with the
+    # concrete backend they actually served. We surface this through
+    # ``run_conversation()`` so callers can report it to the end user
+    # instead of echoing the alias the client originally sent.
+    agent._last_response_model = None
+
     # /steer mechanism — inject a user note into the next tool result
     # without interrupting the agent. Unlike interrupt(), steer() does
     # NOT set _interrupt_requested; it waits for the current tool batch

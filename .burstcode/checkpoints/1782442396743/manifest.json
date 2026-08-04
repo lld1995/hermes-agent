@@ -1,0 +1,8 @@
+{
+  "label": "prompt: custom_providers: - name: my-server base_url: http://your...",
+  "createdAt": 1782442396743,
+  "baseRef": "file:1782442217376",
+  "chainDepth": 18,
+  "files": [],
+  "deleted": []
+}
