@@ -1,4 +1,6 @@
 #!/command/with-contenv sh
 # Suricata needs root for packet capture and its vendor-owned runtime/log dirs.
 # s6-overlay enters with effective root even though the image's default user is hermes.
-exec s6-setuidgid root /opt/cstsas/suricata/bin/suricata --unix-socket -D
+# A daemonized Suricata cannot remove its PID/socket files when s6 stops the container,
+# so remove stale runtime state before starting it again after `docker restart`.
+exec s6-setuidgid root /bin/sh -c "rm -f /opt/cstsas/suricata/var/run/suricata.pid /opt/cstsas/suricata/var/run/suricata-command.socket; exec /opt/cstsas/suricata/bin/suricata --unix-socket -D"
