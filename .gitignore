@@ -116,4 +116,4 @@ scripts/out/
 .burstcode/
 
 # Local-only Suricata bundle (exceeds GitHub's 100 MB file limit).
-/custom/suricata-offline-package-20260731-174922.tar.gz
+/custom

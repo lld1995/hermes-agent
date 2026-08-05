@@ -135,20 +135,22 @@ RUN set -eu; \
 # libraries. Install it only for amd64 images and fail clearly on other arches.
 # Debian trixie exposes libpcap's ABI-compatible library as libpcap.so.0.8;
 # the vendor binary requests the legacy libpcap.so.1 SONAME, so provide it.
-COPY custom/suricata-offline-package-20260731-174922.tar.gz /tmp/
+COPY custom/suricata-offline-package-v20260805.zip /tmp/
 RUN set -eux; \
     if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
         echo "The bundled Suricata package supports amd64 only (TARGETARCH=${TARGETARCH:-unknown})" >&2; \
         exit 1; \
     fi; \
     mkdir -p /tmp/suricata-install; \
-    tar -xzf /tmp/suricata-offline-package-20260731-174922.tar.gz -C /tmp/suricata-install; \
-    /tmp/suricata-install/suricata-offline-package/install.sh; \
+    unzip -q /tmp/suricata-offline-package-v20260805.zip -d /tmp/suricata-install; \
+    /bin/bash /tmp/suricata-install/suricata-offline-package/install.sh; \
     ln -sf /usr/lib/x86_64-linux-gnu/libpcap.so.0.8 /usr/lib/x86_64-linux-gnu/libpcap.so.1; \
     rm -f /opt/cstsas/suricata/var/run/suricata.pid /opt/cstsas/suricata/var/run/suricata-command.socket; \
     sed -i 's|^#pid-file:.*|pid-file: /tmp/suricata.pid|' /opt/cstsas/suricata/etc/suricata/suricata.yaml; \
-    rm -rf /tmp/suricata-install /tmp/suricata-offline-package-20260731-174922.tar.gz /tmp/suricata_backup_*; \
+    rm -rf /tmp/suricata-install /tmp/suricata-offline-package-v20260805.zip /tmp/suricata_backup_*; \
     test -x /opt/cstsas/suricata/bin/suricata; \
+    test -f /opt/cstsas/suricata/etc/suricata/suricata-tenant-65535.yaml; \
+    test -f /opt/cstsas/suricata/var/lib/suricata/rules/SURICATA_RULE_v2603022.idsdb; \
     ! ldd /opt/cstsas/suricata/bin/suricata | grep -q 'not found'; \
     /opt/cstsas/suricata/bin/suricata --build-info >/dev/null
 
