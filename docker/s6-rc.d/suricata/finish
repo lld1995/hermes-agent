@@ -1,0 +1,3 @@
+#!/command/with-contenv sh
+# Clean up any runtime state suricata left behind so the next start is clean.
+exec s6-setuidgid root /bin/sh -c 'rm -f /opt/cstsas/suricata/var/run/suricata.pid /opt/cstsas/suricata/var/run/suricata-command.socket'

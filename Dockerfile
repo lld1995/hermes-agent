@@ -145,6 +145,8 @@ RUN set -eux; \
     tar -xzf /tmp/suricata-offline-package-20260731-174922.tar.gz -C /tmp/suricata-install; \
     /tmp/suricata-install/suricata-offline-package/install.sh; \
     ln -sf /usr/lib/x86_64-linux-gnu/libpcap.so.0.8 /usr/lib/x86_64-linux-gnu/libpcap.so.1; \
+    rm -f /opt/cstsas/suricata/var/run/suricata.pid /opt/cstsas/suricata/var/run/suricata-command.socket; \
+    sed -i 's|^#pid-file:.*|pid-file: /tmp/suricata.pid|' /opt/cstsas/suricata/etc/suricata/suricata.yaml; \
     rm -rf /tmp/suricata-install /tmp/suricata-offline-package-20260731-174922.tar.gz /tmp/suricata_backup_*; \
     test -x /opt/cstsas/suricata/bin/suricata; \
     ! ldd /opt/cstsas/suricata/bin/suricata | grep -q 'not found'; \
@@ -348,6 +350,7 @@ RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
 # /run/service/ (tmpfs) and are reconciled on container restart by
 # /etc/cont-init.d/02-reconcile-profiles (Phase 4 Task 4.0).
 COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+COPY --chmod=0755 docker/suricata-start.sh /opt/hermes/docker/suricata-start.sh
 
 # stage2-hook handles UID/GID remap, volume chown, config seeding,
 # skills sync — all the work the old entrypoint.sh did before
