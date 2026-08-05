@@ -1,5 +1,6 @@
 # ---------- Incremental build on top of hermes-agent:test ----------
-# Adds: external model override fix (api_server + runtime kwargs).
+# Adds: external model override fix (api_server + runtime kwargs), analysis
+# libs (python-docx, cryptography, pycryptodome) and unzip.
 # Build:
 #   docker build -f Dockerfile.incremental \
 #     -t docker.westsnow.cn/hermes-agent:test \
@@ -9,7 +10,23 @@ FROM docker.westsnow.cn/hermes-agent:test
 
 USER root
 
-# Copy only the files changed for the external model override fix.
+# Install system tool and Python libraries as root.
+# Override UV_CACHE_DIR so uv can write the cache (base image points it to
+# /build-cache/uv which is only writable during the original full build).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN UV_CACHE_DIR=/tmp/uv-cache uv pip install \
+        --python /opt/hermes/.venv \
+        python-docx==1.2.0 \
+        cryptography==46.0.7 \
+        pycryptodome==3.23.0 && \
+    rm -rf /tmp/uv-cache
+
+# Copy only the files changed since the base image was built.
+COPY --chown=hermes:hermes run_agent.py /opt/hermes/run_agent.py
+COPY --chown=hermes:hermes agent/chat_completion_helpers.py /opt/hermes/agent/chat_completion_helpers.py
 COPY --chown=hermes:hermes gateway/run.py /opt/hermes/gateway/run.py
 COPY --chown=hermes:hermes gateway/platforms/api_server.py /opt/hermes/gateway/platforms/api_server.py
 
