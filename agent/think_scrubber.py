@@ -56,7 +56,7 @@ intentional, bounded construct.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 __all__ = ["StreamingThinkScrubber"]
 
@@ -103,18 +103,19 @@ class StreamingThinkScrubber:
         self._buf = ""
         self._last_emitted_ended_newline = True
 
-    def feed(self, text: str) -> str:
-        """Feed one delta; return the scrubbed visible portion.
+    def feed(self, text: str) -> Tuple[str, str]:
+        """Feed one delta; return ``(visible, reasoning)``.
 
-        May return an empty string when the entire delta is reasoning
-        content or is being held back pending resolution of a partial
-        tag at the boundary.
+        ``visible`` is safe for the normal assistant-content channel.
+        ``reasoning`` contains text captured from inside reasoning tags;
+        tag literals themselves are never returned.
         """
         if not text:
-            return ""
+            return "", ""
         buf = self._buf + text
         self._buf = ""
         out: list[str] = []
+        reasoning_out: list[str] = []
 
         while buf:
             if self._in_block:
@@ -123,12 +124,17 @@ class StreamingThinkScrubber:
                     buf, self._CLOSE_TAGS,
                 )
                 if close_idx == -1:
-                    # No close yet — hold back a potential partial
-                    # close-tag prefix; discard everything else.
+                    # No close yet — hold back a potential partial close-tag
+                    # prefix and surface everything before it as reasoning.
                     held = self._max_partial_suffix(buf, self._CLOSE_TAGS)
+                    consumed = buf[:-held] if held else buf
+                    if consumed:
+                        reasoning_out.append(consumed)
                     self._buf = buf[-held:] if held else ""
-                    return "".join(out)
-                # Found close: discard block content + tag, continue.
+                    return "".join(out), "".join(reasoning_out)
+                # Found close: capture block content, drop the tag, continue.
+                if close_idx > 0:
+                    reasoning_out.append(buf[:close_idx])
                 buf = buf[close_idx + close_len:]
                 self._in_block = False
             else:
@@ -149,8 +155,8 @@ class StreamingThinkScrubber:
                 if pair is not None and (
                     open_idx == -1 or pair[0] <= open_idx
                 ):
-                    start_idx, end_idx = pair
-                    preceding = buf[:start_idx]
+                    pair_open, pair_open_len, pair_close, pair_end = pair
+                    preceding = buf[:pair_open]
                     if preceding:
                         preceding = self._strip_orphan_close_tags(preceding)
                         if preceding:
@@ -158,7 +164,10 @@ class StreamingThinkScrubber:
                             self._last_emitted_ended_newline = (
                                 preceding.endswith("\n")
                             )
-                    buf = buf[end_idx:]
+                    inner = buf[pair_open + pair_open_len:pair_close]
+                    if inner:
+                        reasoning_out.append(inner)
+                    buf = buf[pair_end:]
                     continue
 
                 if open_idx != -1:
@@ -197,11 +206,11 @@ class StreamingThinkScrubber:
                         self._last_emitted_ended_newline = (
                             emit_text.endswith("\n")
                         )
-                return "".join(out)
+                return "".join(out), "".join(reasoning_out)
 
-        return "".join(out)
+        return "".join(out), "".join(reasoning_out)
 
-    def flush(self) -> str:
+    def flush(self) -> Tuple[str, str]:
         """End-of-stream flush.
 
         If still inside an unterminated block, held-back content is
@@ -217,20 +226,19 @@ class StreamingThinkScrubber:
         visible reply.
         """
         if self._in_block:
+            reasoning_tail = self._buf
             self._buf = ""
             self._in_block = False
             # Next feed() is a new stream — start-of-stream is a boundary.
             self._last_emitted_ended_newline = True
-            return ""
+            return "", reasoning_tail
         tail = self._buf
         self._buf = ""
-        # Same for the non-block path: do NOT derive the boundary flag
-        # from the flushed tail (e.g. a held-back '<').  End-of-stream
-        # means the next feed() starts a new model response.
+        # End-of-stream means the next feed() starts a new model response.
         self._last_emitted_ended_newline = True
         if not tail:
-            return ""
-        return self._strip_orphan_close_tags(tail)
+            return "", ""
+        return self._strip_orphan_close_tags(tail), ""
 
     # ── internal helpers ───────────────────────────────────────────────
 
@@ -252,8 +260,10 @@ class StreamingThinkScrubber:
                 best_len = len(tag)
         return best_idx, best_len
 
-    def _find_earliest_closed_pair(self, buf: str):
-        """Return (start_idx, end_idx) of the earliest closed pair, else None.
+    def _find_earliest_closed_pair(
+        self, buf: str,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Return open/close positions of the earliest closed pair, else None.
 
         A closed pair is ``<tag>...</tag>`` of any variant.  Matches are
         case-insensitive and non-greedy (the closest close tag after
@@ -263,7 +273,7 @@ class StreamingThinkScrubber:
         earlier wins.
         """
         buf_lower = buf.lower()
-        best: "tuple[int, int] | None" = None
+        best: Optional[Tuple[int, int, int, int]] = None
         for open_tag, close_tag in zip(self._OPEN_TAGS, self._CLOSE_TAGS):
             open_lower = open_tag.lower()
             close_lower = close_tag.lower()
@@ -277,7 +287,7 @@ class StreamingThinkScrubber:
                 continue
             end_idx = close_idx + len(close_lower)
             if best is None or open_idx < best[0]:
-                best = (open_idx, end_idx)
+                best = (open_idx, len(open_lower), close_idx, end_idx)
         return best
 
     def _find_open_at_boundary(

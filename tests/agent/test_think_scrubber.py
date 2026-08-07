@@ -16,9 +16,21 @@ from agent.think_scrubber import StreamingThinkScrubber
 
 def _drive(scrubber: StreamingThinkScrubber, deltas: list[str]) -> str:
     """Feed a sequence of deltas and return the concatenated visible output."""
-    out = [scrubber.feed(d) for d in deltas]
-    out.append(scrubber.flush())
+    out = [scrubber.feed(d)[0] for d in deltas]
+    out.append(scrubber.flush()[0])
     return "".join(out)
+
+
+def _drive_channels(
+    scrubber: StreamingThinkScrubber, deltas: list[str],
+) -> tuple[str, str]:
+    """Return concatenated visible and reasoning channels."""
+    chunks = [scrubber.feed(delta) for delta in deltas]
+    chunks.append(scrubber.flush())
+    return (
+        "".join(visible for visible, _ in chunks),
+        "".join(reasoning for _, reasoning in chunks),
+    )
 
 
 class TestClosedPairs:
@@ -109,6 +121,24 @@ class TestTheMiniMaxScenario:
         assert out == ""
 
 
+class TestReasoningChannel:
+    def test_closed_pair_returns_both_channels(self) -> None:
+        assert _drive_channels(
+            StreamingThinkScrubber(),
+            ["before\n<think>secret", " reasoning</think>after"],
+        ) == ("before\nafter", "secret reasoning")
+
+    def test_unterminated_block_flushes_partial_close_as_reasoning(self) -> None:
+        assert _drive_channels(
+            StreamingThinkScrubber(), ["<think>secret</thi"],
+        ) == ("", "secret</thi")
+
+    def test_empty_input_always_returns_two_tuple(self) -> None:
+        scrubber = StreamingThinkScrubber()
+        assert scrubber.feed("") == ("", "")
+        assert scrubber.flush() == ("", "")
+
+
 class TestResetAndReentry:
     def test_reset_clears_in_block_state(self) -> None:
         s = StreamingThinkScrubber()
@@ -141,9 +171,9 @@ class TestFlushBehaviour:
         opening ``<think>`` looked mid-line and leaked into the UI.
         """
         s = StreamingThinkScrubber()
-        assert s.feed("word") == "word"
+        assert s.feed("word") == ("word", "")
         assert s._last_emitted_ended_newline is False
-        assert s.flush() == ""
+        assert s.flush() == ("", "")
         assert s._last_emitted_ended_newline is True
         assert (
             _drive(s, ["<think>", "secret reasoning", "</think>", "Visible answer"])
@@ -154,7 +184,7 @@ class TestFlushBehaviour:
         """Flushing a held-back ``<`` must not make the next open tag leak."""
         s = StreamingThinkScrubber()
         s.feed("word<")
-        assert s.flush() == "<"
+        assert s.flush() == ("<", "")
         assert s._last_emitted_ended_newline is True
         assert _drive(s, ["<think>hidden</think>Hello"]) == "Hello"
 
