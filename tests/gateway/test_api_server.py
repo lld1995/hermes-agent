@@ -2711,14 +2711,17 @@ class TestKeyRejectionSetsNonRetryableFatalError:
 
 
 # ---------------------------------------------------------------------------
-# Bare-model opt-in gate (direct_model_requests) for _request_agent_overrides
+# Bare-model passthrough (direct_model_requests) for _request_agent_overrides
 # ---------------------------------------------------------------------------
 
 
 class TestDirectModelRequestsGate:
-    """Bare ``model`` (no ``provider``) is opt-in on OpenAI-compatible
-    endpoints so generic clients hardcoding "gpt-4o" keep falling back to
-    the gateway default (idea credit: PR #22825 by @mssteuer)."""
+    """Bare ``model`` is honored by default on OpenAI-compatible endpoints.
+
+    ``direct_model_requests: false`` remains available for deployments whose
+    generic clients send a hardcoded model name that should fall back to the
+    gateway default.
+    """
 
     def test_bare_model_dropped_when_disallowed(self):
         overrides = _request_agent_overrides(
@@ -2726,19 +2729,19 @@ class TestDirectModelRequestsGate:
         )
         assert "requested_model" not in overrides
 
-
-    def test_adapter_flag_opt_in(self):
-        adapter = APIServerAdapter(
-            PlatformConfig(enabled=True, extra={"direct_model_requests": True})
-        )
+    def test_adapter_flag_default_on(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
         assert adapter._direct_model_requests is True
 
+    def test_adapter_flag_can_disable(self):
+        adapter = APIServerAdapter(
+            PlatformConfig(enabled=True, extra={"direct_model_requests": False})
+        )
+        assert adapter._direct_model_requests is False
 
     @pytest.mark.asyncio
-    async def test_chat_completions_bare_model_honored_when_enabled(self):
-        adapter = APIServerAdapter(
-            PlatformConfig(enabled=True, extra={"direct_model_requests": True})
-        )
+    async def test_chat_completions_bare_model_honored_by_default(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={}))
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
@@ -2755,6 +2758,9 @@ class TestDirectModelRequestsGate:
                 )
         assert resp.status == 200
         assert mock_run.call_args.kwargs.get("requested_model") == "openai/gpt-5"
+
+
+class TestRouteWithoutModelKeepsDefault:
 
 
 class TestRouteWithoutModelKeepsDefault:

@@ -1396,17 +1396,13 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_routes: Dict[str, Dict[str, Any]] = self._parse_model_routes(
             extra.get("model_routes"),
         )
-        # direct_model_requests: opt-in passthrough for a bare ``model`` value
-        # (no ``provider``) on the OpenAI-compatible surfaces
-        # (/v1/chat/completions, /v1/responses).  Off by default: generic
-        # OpenAI clients routinely hardcode model names ("gpt-4o", ...), and
-        # existing deployments rely on those falling back to the gateway
-        # default rather than switching the executing model.  Requests that
-        # send an explicit ``provider`` — and the Hermes-native session-chat
-        # and /v1/runs endpoints — are always honored regardless of this flag.
-        # (Idea credit: PR #22825 by @mssteuer.)
+        # Honor a bare ``model`` value by default on the OpenAI-compatible
+        # surfaces.  Set ``direct_model_requests: false`` for generic clients
+        # that send a hardcoded model name and should use the gateway default.
+        # Requests with an explicit ``provider`` — and Hermes-native
+        # session-chat and /v1/runs endpoints — are honored regardless.
         self._direct_model_requests: bool = _coerce_request_bool(
-            extra.get("direct_model_requests"), default=False
+            extra.get("direct_model_requests"), default=True
         )
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
