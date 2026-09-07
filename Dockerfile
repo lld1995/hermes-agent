@@ -155,7 +155,9 @@ RUN set -eux; \
     /opt/cstsas/suricata/bin/suricata --build-info >/dev/null
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
-RUN useradd -u 10000 -m -d /opt/data hermes
+# Suricata runs as hermes, so its runtime/log directories must be writable.
+RUN useradd -u 10000 -m -d /opt/data hermes && \
+    chown -R hermes:hermes /opt/cstsas/suricata/var
 
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
@@ -362,9 +364,9 @@ COPY --chmod=0755 docker/suricata-start.sh /opt/hermes/docker/suricata-start.sh
 # 02-reconcile-profiles re-creates per-profile gateway s6 service
 # slots from $HERMES_HOME/profiles/<name>/ after a container restart
 # (the /run/service/ scandir is tmpfs and wiped on restart). Phase 4.
-# Keep the container's initial user as root for s6/PID 1 and privileged services
-# such as Suricata. main-wrapper.sh and service run scripts explicitly drop
-# Hermes application processes to the unprivileged hermes user.
+# Keep the container's initial user as root for s6/PID 1 and the stage2 setup
+# (UID/GID remapping and volume ownership). Suricata and Hermes application
+# services explicitly drop to the unprivileged hermes user.
 USER root
 RUN mkdir -p /etc/cont-init.d && \
     printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \
