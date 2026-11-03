@@ -70,7 +70,9 @@ RUN set -eux; \
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli xz-utils \
-    unzip tshark wireshark-common && \
+    unzip tshark wireshark-common \
+    poppler-utils \
+    libreoffice-writer libreoffice-calc libreoffice-impress && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- s6-overlay install ----------
@@ -130,34 +132,8 @@ RUN set -eu; \
     # ENTRYPOINT. Safe to drop once the affected catalogs are updated.\
     ln -sf /init /usr/bin/tini
 
-# ---------- Custom Suricata offline package ----------
-# This vendor build targets CentOS/RHEL 7 on x86_64 and bundles most runtime
-# libraries. Install it only for amd64 images and fail clearly on other arches.
-# Debian trixie exposes libpcap's ABI-compatible library as libpcap.so.0.8;
-# the vendor binary requests the legacy libpcap.so.1 SONAME, so provide it.
-COPY custom/suricata-offline-package-v20260805.zip /tmp/
-RUN set -eux; \
-    if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
-        echo "The bundled Suricata package supports amd64 only (TARGETARCH=${TARGETARCH:-unknown})" >&2; \
-        exit 1; \
-    fi; \
-    mkdir -p /tmp/suricata-install; \
-    unzip -q /tmp/suricata-offline-package-v20260805.zip -d /tmp/suricata-install; \
-    /bin/bash /tmp/suricata-install/suricata-offline-package/install.sh; \
-    ln -sf /usr/lib/x86_64-linux-gnu/libpcap.so.0.8 /usr/lib/x86_64-linux-gnu/libpcap.so.1; \
-    rm -f /opt/cstsas/suricata/var/run/suricata.pid /opt/cstsas/suricata/var/run/suricata-command.socket; \
-    sed -i 's|^#pid-file:.*|pid-file: /tmp/suricata.pid|' /opt/cstsas/suricata/etc/suricata/suricata.yaml; \
-    rm -rf /tmp/suricata-install /tmp/suricata-offline-package-v20260805.zip /tmp/suricata_backup_*; \
-    test -x /opt/cstsas/suricata/bin/suricata; \
-    test -f /opt/cstsas/suricata/etc/suricata/suricata-tenant-65535.yaml; \
-    test -f /opt/cstsas/suricata/var/lib/suricata/rules/SURICATA_RULE_v2603022.idsdb; \
-    ! ldd /opt/cstsas/suricata/bin/suricata | grep -q 'not found'; \
-    /opt/cstsas/suricata/bin/suricata --build-info >/dev/null
-
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
-# Suricata runs as hermes, so its runtime/log directories must be writable.
-RUN useradd -u 10000 -m -d /opt/data hermes && \
-    chown -R hermes:hermes /opt/cstsas/suricata/var
+RUN useradd -u 10000 -m -d /opt/data hermes
 
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
@@ -271,6 +247,9 @@ RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked
     HTTPS_PROXY="${PIP_PROXY}" HTTP_PROXY="${PIP_PROXY}" \
     uv pip install --python /opt/hermes/.venv/bin/python \
         "python-docx==1.2.0" \
+        "python-pptx==1.0.2" \
+        "openpyxl==3.1.5" \
+        "reportlab==4.2.5" \
         "cryptography==46.0.7" \
         "pycryptodome==3.23.0" \
         "numpy==2.4.3" \
@@ -280,9 +259,9 @@ RUN --mount=type=cache,target=/build-cache/uv,uid=10000,gid=10000,sharing=locked
     system_site_packages="$(/usr/bin/python3 -c 'import site; print(site.getsitepackages()[0])')" && \
     printf '%s\n' "${venv_site_packages}" > "${system_site_packages}/hermes-analysis-libs.pth" && \
     /opt/hermes/.venv/bin/python -c \
-        'import docx, cryptography, Crypto, numpy, scapy, pyshark; print("Hermes venv analysis dependencies OK")' && \
+        'import docx, pptx, openpyxl, reportlab, cryptography, Crypto, numpy, scapy, pyshark; print("Hermes venv analysis dependencies OK")' && \
     /usr/bin/python3 -c \
-        'import docx, cryptography, Crypto, numpy, scapy, pyshark; print("System Python analysis dependencies OK")' && \
+        'import docx, pptx, openpyxl, reportlab, cryptography, Crypto, numpy, scapy, pyshark; print("System Python analysis dependencies OK")' && \
     chown -R 10000:10000 /build-cache/uv
 
 # ---------- Source code ----------
@@ -354,7 +333,6 @@ RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
 # /run/service/ (tmpfs) and are reconciled on container restart by
 # /etc/cont-init.d/02-reconcile-profiles (Phase 4 Task 4.0).
 COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
-COPY --chmod=0755 docker/suricata-start.sh /opt/hermes/docker/suricata-start.sh
 
 # stage2-hook handles UID/GID remap, volume chown, config seeding,
 # skills sync — all the work the old entrypoint.sh did before
@@ -365,8 +343,8 @@ COPY --chmod=0755 docker/suricata-start.sh /opt/hermes/docker/suricata-start.sh
 # slots from $HERMES_HOME/profiles/<name>/ after a container restart
 # (the /run/service/ scandir is tmpfs and wiped on restart). Phase 4.
 # Keep the container's initial user as root for s6/PID 1 and the stage2 setup
-# (UID/GID remapping and volume ownership). Suricata and Hermes application
-# services explicitly drop to the unprivileged hermes user.
+# (UID/GID remapping and volume ownership). Hermes application services
+# explicitly drop to the unprivileged hermes user.
 USER root
 RUN mkdir -p /etc/cont-init.d && \
     printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \

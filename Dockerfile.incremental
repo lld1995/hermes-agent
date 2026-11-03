@@ -1,6 +1,7 @@
 # ---------- Incremental build on top of hermes-agent:test ----------
 # Adds: external model override fix (api_server + runtime kwargs), analysis
-# libs (python-docx, cryptography, pycryptodome) and unzip.
+# libs (python-docx, python-pptx, openpyxl, reportlab, cryptography, pycryptodome,
+# numpy, scapy, pyshark), poppler-utils, LibreOffice headless and unzip.
 # Build:
 #   docker build -f Dockerfile.incremental \
 #     -t docker.westsnow.cn/hermes-agent:test \
@@ -14,14 +15,22 @@ USER root
 # Override UV_CACHE_DIR so uv can write the cache (base image points it to
 # /build-cache/uv which is only writable during the original full build).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends unzip && \
+    apt-get install -y --no-install-recommends \
+        unzip poppler-utils \
+        libreoffice-writer libreoffice-calc libreoffice-impress && \
     rm -rf /var/lib/apt/lists/*
 
 RUN UV_CACHE_DIR=/tmp/uv-cache uv pip install \
         --python /opt/hermes/.venv \
         python-docx==1.2.0 \
+        python-pptx==1.0.2 \
+        openpyxl==3.1.5 \
+        reportlab==4.2.5 \
         cryptography==46.0.7 \
-        pycryptodome==3.23.0 && \
+        pycryptodome==3.23.0 \
+        numpy==2.4.3 \
+        scapy==2.7.0 \
+        pyshark==0.6 && \
     rm -rf /tmp/uv-cache
 
 # Copy only the files changed since the base image was built.

@@ -1,4 +1,0 @@
-#!/command/with-contenv sh
-# Suricata runs unprivileged; the container runtime must grant any network
-# capabilities required by the configured capture mode.
-exec s6-setuidgid hermes /bin/sh /opt/hermes/docker/suricata-start.sh
